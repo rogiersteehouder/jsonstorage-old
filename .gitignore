@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Backup
+*.bak
+*.ori
+*.orig
+*.tmp
+
+# Windows
+[Dd]esktop.ini
+*.lnk
+
+# macOS
+.DS_Store
+._*
+
+# VSCode / VSCodium
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.vscode-oss/*
+!.vscode-oss/settings.json
+!.vscode-oss/tasks.json
+!.vscode-oss/launch.json
+!.vscode-oss/extensions.json
+*.code-workspace
+.history/
+
+# Project
+instance/
+*.sqlite
+*.pem

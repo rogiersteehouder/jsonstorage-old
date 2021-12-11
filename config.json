@@ -1,0 +1,18 @@
+{
+	"security": {
+		"password": "Test",
+		"hash": "$pbkdf2-sha256$29000$E.IcI2QMwZjTGuMcw9j7vw$KwExI0fWRwzUjGxp28uOuktYzhdXw7PGqktACwBhM7E",
+		"period": 0
+	},
+	"server": {
+		"directory": null,
+		"host": "localhost",
+		"port": 8001,
+		"log level": "info",
+		"ssl-key": "localhost-key.pem",
+		"ssl-cert": "localhost.pem"
+	},
+	"database": {
+		"filename": "jsonstorage.sqlite"
+	}
+}

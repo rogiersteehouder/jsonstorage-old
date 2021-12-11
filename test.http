@@ -1,0 +1,52 @@
+@host = https://localhost:8001
+@auth = Authorization: Basic user:Test
+
+####
+
+get {{host}}/openapi.json
+
+####
+
+get {{host}}/
+{{auth}}
+
+####
+
+get {{host}}/?like=%25
+{{auth}}
+
+####
+
+get {{host}}/?glob=*
+{{auth}}
+
+####
+
+get {{host}}/test
+{{auth}}
+
+####
+
+put {{host}}/test
+{{auth}}
+Content-Type: application/json
+
+{ "message": "test" }
+
+####
+
+patch {{host}}/test
+{{auth}}
+Content-Type: application/json-patch+json
+
+[
+    { "op": "add", "path": "/description", "value": "Testing 1..2..3.." },
+    { "op": "remove", "path": "/message" }
+]
+
+####
+
+delete {{host}}/test
+{{auth}}
+
+####
