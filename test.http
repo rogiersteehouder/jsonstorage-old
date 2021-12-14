@@ -12,6 +12,16 @@ get {{host}}/
 
 ####
 
+get {{host}}/?cleanup=true
+{{auth}}
+
+####
+
+get {{host}}/?sync=true
+{{auth}}
+
+####
+
 get {{host}}/?like=%25
 {{auth}}
 
