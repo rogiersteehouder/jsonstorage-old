@@ -37,6 +37,11 @@ get {{host}}/test
 
 ####
 
+get {{host}}/test?effdt=2021-12-14T13:30:53
+{{auth}}
+
+####
+
 put {{host}}/test
 {{auth}}
 Content-Type: application/json

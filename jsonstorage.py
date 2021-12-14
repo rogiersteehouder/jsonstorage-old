@@ -158,6 +158,12 @@ class Security:
 # JSON Storage webservices
 #####
 
+def datetime_todb(d: datetime.datetime) -> str:
+    return d.isoformat(sep=' ', timespec='seconds')
+
+def datetime_fromdb(s: str) -> datetime.datetime:
+    return datetime.datetime.fromisoformat(s)
+
 STATUS_DESCR = {
     status.HTTP_204_NO_CONTENT: { 'description': 'Sucessfully removed' },
     status.HTTP_403_FORBIDDEN: { 'description': 'Authorization failed' },
@@ -183,6 +189,9 @@ class TrueString(str):
 
 class JSONStorage:
     """JSON storage webservices"""
+    sql_get_item = "select s.content from storage s where s.name = :p and effdt <= :d and not exists (select 1 from storage where name = s.name and effdt > s.effdt and effdt <= :d) and s.status = 'A'"
+    sql_insert_item = "insert into storage values(:p, :d, :s, :c)"
+
     def __init__(self, base_dir: Path, config: Config):
         self.config = config
         self._db_file = base_dir / config.get('database.filename', 'jsonstorage.sqlite')
@@ -211,10 +220,10 @@ class JSONStorage:
                 cur.execute("with old_stuff as (select s.name, s.effdt from storage s where s.effdt < datetime('now', '-1 years') {} and (s.status = 'I' or exists (select 1 from storage where name = s.name and effdt > s.effdt))) delete from storage where exists (select 1 from old_stuff where name = storage.name and effdt = storage.effdt)".format(crit))
 
             if sync:
-                cur.execute("select s.name, s.effdt, s.status from storage s order by s.name, s.effdt".format(crit), {'l': like, 'g': glob})
-                items = [{ 'name': row['name'], 'effdt': datetime.datetime.fromisoformat(row['effdt']), 'status': row['status']} for row in cur.fetchall()]
+                cur.execute("select s.name, s.effdt, s.status from storage s where 1=1 {} order by s.name, s.effdt".format(crit), {'l': like, 'g': glob})
+                items = [{ 'name': row['name'], 'effdt': datetime_fromdb(row['effdt']), 'status': row['status']} for row in cur.fetchall()]
             else:
-                cur.execute("select s.name from storage s where not exists (select 1 from storage where name = s.name and effdt > s.effdt) and s.status = 'A' {} order by s.name".format(crit), {'l': like, 'g': glob})
+                cur.execute("select s.name from storage s where effdt <= :d and not exists (select 1 from storage where name = s.name and effdt > s.effdt and effdt <= :d) and s.status = 'A' {} order by s.name".format(crit), {'l': like, 'g': glob, 'd': datetime_todb(datetime.datetime.now())})
                 items = [row['name'] for row in cur.fetchall()]
             cur.close()
 
@@ -237,12 +246,16 @@ class JSONStorage:
     }
 
     def get_json(self,
-        id: str
+        id: str,
+        effdt: datetime.datetime = Query(None, description="Get item with specific date/time"),
     ):
         """Retrieve a stored json object"""
+        if effdt is None:
+            effdt = datetime.datetime.now()
+
         with self._db_connect() as conn:
             cur = conn.cursor()
-            cur.execute("select s.content from storage s where s.name = :p and not exists (select 1 from storage where name = s.name and effdt > s.effdt) and s.status = 'A'", {'p': id})
+            cur.execute(self.sql_get_item, {'p': id, 'd': datetime_todb(effdt)})
             row = cur.fetchone()
             cur.close()
         if row is None:
@@ -262,12 +275,16 @@ class JSONStorage:
 
     def put_json(self,
         id: str,
-        content = Body(..., example={ "key": "value", "...": "..." })
+        content = Body(..., example={ "key": "value", "...": "..." }),
+        effdt: datetime.datetime = Query(None, description="Add item with specific date/time"),
     ):
         """Store a json object"""
+        if effdt is None:
+            effdt = datetime.datetime.now()
+
         with self._db_connect() as conn:
             cur = conn.cursor()
-            cur.execute("insert into storage values(:p, CURRENT_TIMESTAMP, 'A', :c)", {'p': id, 'c': json.dumps(content)})
+            cur.execute(self.sql_insert_item, {'p': id, 'd': datetime_todb(effdt), 's': 'A', 'c': json.dumps(content)})
             cur.close()
         return content
     put_json.route = '/{id:path}'
@@ -294,7 +311,7 @@ class JSONStorage:
 
         with self._db_connect() as conn:
             cur = conn.cursor()
-            cur.execute("select s.content from storage s where s.name = :p and not exists (select 1 from storage where name = s.name and effdt > s.effdt) and s.status = 'A'", {'p': id})
+            cur.execute(self.sql_get_item, {'p': id, 'd': datetime_todb(datetime.datetime.now())})
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -302,7 +319,7 @@ class JSONStorage:
             json_orig = json.loads(row['content'])
             json_new = jsonpatch.apply_patch(json_orig, patch)
 
-            cur.execute("insert into storage values(:p, CURRENT_TIMESTAMP, 'A', :c)", {'p': id, 'c': json.dumps(json_new)})
+            cur.execute(self.sql_insert_item, {'p': id, 'd': datetime_todb(datetime.datetime.now()), 's': 'A', 'c': json.dumps(json_new)})
             cur.close()
 
         return json_new
@@ -319,20 +336,22 @@ class JSONStorage:
     }
 
     def delete_json(self,
-        id: str
+        id: str,
+        effdt: datetime.datetime = Query(None, description="Delete item with specific date/time"),
     ):
         """Remove a stored json object"""
-        found = 0
+        if effdt is None:
+            effdt = datetime.datetime.now()
+
         with self._db_connect() as conn:
             cur = conn.cursor()
 
-            cur.execute("select 1 from storage s where s.name = :p and not exists (select 1 from storage where name = s.name and effdt > s.effdt) and s.status = 'A'", {'p': id})
+            cur.execute(self.sql_get_item, {'p': id, 'd': datetime_todb(effdt)})
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(status.HTTP_404_NOT_FOUND)
 
-            #cur.execute("delete from storage where name = :p", {'p': id})
-            cur.execute("insert into storage values(:p, CURRENT_TIMESTAMP, 'I', '')", {'p': id})
+            cur.execute(self.sql_insert_item, {'p': id, 'd': datetime_todb(effdt), 's': 'I', 'c': ''})
             cur.close()
         # default satus 204 when deleting something, 404 when there was nothing to delete
     delete_json.route = '/{id:path}'
