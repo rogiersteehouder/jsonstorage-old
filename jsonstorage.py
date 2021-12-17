@@ -10,17 +10,21 @@ __author__  = 'Rogier Steehouder'
 __date__    = '2021-12-11'
 __version__ = '1.0'
 
+# TODO: logging
+# TODO: etag
+
 import sys
 import contextlib
 import datetime
 import getpass
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import List
 
 import uvicorn
-from fastapi import FastAPI, Depends, APIRouter, Query, Body, Response, status, HTTPException
+from fastapi import FastAPI, Depends, APIRouter, Request, Query, Body, Response, status, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from passlib.context import CryptContext
 
@@ -149,9 +153,11 @@ class Security:
             ok = (ok and self.renew > datetime.datetime.now())
             self.renew = datetime.datetime.now() + self.period
         if not ok:
+            logging.getLogger('jsonstorage.security').warning('Invalid password')
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Incorrect password", headers={'WWW-Authenticate': 'Basic'})
         if new_hash and self.new_hash is not None:
             self.new_hash(new_hash)
+            logging.getLogger('jsonstorage.security').info('New hash generated and saved')
 
 
 #####
@@ -194,11 +200,13 @@ class JSONStorage:
 
     def __init__(self, base_dir: Path, config: Config):
         self.config = config
+        self.logger = logging.getLogger('jsonstorage')
         self._db_file = base_dir / config.get('database.filename', 'jsonstorage.sqlite')
         if not self._db_file.exists():
             self._db_init()
 
     def get_list(self,
+        request: Request,
         like: str = Query(None, description="Filter with sql 'like' syntax", example='%abc%'),
         glob: str = Query(None, description="Filter with 'glob' syntax", example='\*abc\*'),
         sync: bool = Query(False, description="Output sync format with update date/time"),
@@ -217,9 +225,11 @@ class JSONStorage:
         with self._db_connect() as conn:
             cur = conn.cursor()
             if cleanup:
+                self.logger.info('Cleanup requested by {}'.format(request.client.host))
                 cur.execute("with old_stuff as (select s.name, s.effdt from storage s where s.effdt < datetime('now', '-1 years') {} and (s.status = 'I' or exists (select 1 from storage where name = s.name and effdt > s.effdt))) delete from storage where exists (select 1 from old_stuff where name = storage.name and effdt = storage.effdt)".format(crit))
 
             if sync:
+                self.logger.info('Sync list requested by {}'.format(request.client.host))
                 cur.execute("select s.name, s.effdt, s.status from storage s where 1=1 {} order by s.name, s.effdt".format(crit), {'l': like, 'g': glob})
                 items = [{ 'name': row['name'], 'effdt': datetime_fromdb(row['effdt']), 'status': row['status']} for row in cur.fetchall()]
             else:
@@ -279,6 +289,8 @@ class JSONStorage:
         effdt: datetime.datetime = Query(None, description="Add item with specific date/time"),
     ):
         """Store a json object"""
+        self.logger.info('Item {} changed by {}'.format(id, request.client.host))
+
         if effdt is None:
             effdt = datetime.datetime.now()
 
@@ -308,6 +320,8 @@ class JSONStorage:
         # Depends on having the jsonpatch module
         if jsonpatch is None:
             HTTPException(status.HTTP_501_NOT_IMPLEMENTED)
+
+        self.logger.info('Item {} changed by {}'.format(id, request.client.host))
 
         with self._db_connect() as conn:
             cur = conn.cursor()
@@ -340,6 +354,8 @@ class JSONStorage:
         effdt: datetime.datetime = Query(None, description="Delete item with specific date/time"),
     ):
         """Remove a stored json object"""
+        self.logger.info('Item {} removed by {}'.format(id, request.client.host))
+
         if effdt is None:
             effdt = datetime.datetime.now()
 
@@ -448,18 +464,62 @@ def main(args=None):
 
     base_dir = Path(cfg.get('server.directory', cfg_file.parent)).expanduser()
 
+    # Logging
+    logdir = Path(cfg.get('logging.directory', base_dir)).expanduser()
+    logging.config.dictConfig({
+        'version': 1,
+        'disable_existing_loggers': False,
+        'formatters': {
+            'default': {
+                'format': '{asctime} ({name}) {levelname}: {message}',
+                'datefmt': '%Y-%m-%d %H:%M:%S',
+                'style': '{',
+                'use_colors': True
+            }
+        },
+        'handlers': {
+            'screen': {
+                'level': cfg.get('logging.log level', 'error').upper(),
+                'class': 'logging.StreamHandler',
+                'stream': 'ext://sys.stderr',
+                'formatter': 'default'
+            },
+            'file': {
+                'level': 'INFO',
+                'class': 'logging.handlers.TimedRotatingFileHandler',
+                'filename': str(logdir / 'app.log'),
+                'when': 'midnight',
+                'backupCount': 4,
+                'delay': True,
+                'formatter': 'default'
+            }
+        },
+        'loggers': {
+            'jsonstorage': {
+                'level': cfg.get('logging.log level', 'error').upper(),
+                'handlers': ['screen', 'file']
+            },
+            'fastapi': {
+                'level': 'INFO',
+                'handlers': ['screen', 'file']
+            }
+        }
+    })
+
     # Password
     pwd = cfg.get('security.password')
     if pwd is not None:
         cfg['security.hash'] = Security.context.hash(pwd)
         del cfg['security.password']
         cfg.save()
+        logging.getLogger('jsonstorage.security').info('New password hashed and saved')
     pwd_hash = cfg.get('security.hash')
     if pwd_hash is None:
         pwd = getpass.getpass()
         pwd_hash = Security.context.hash(pwd)
         cfg['security.hash'] = pwd_hash
         cfg.save()
+        logging.getLogger('jsonstorage.security').info('New password hashed and saved')
     del pwd
 
     security = Security(cfg['security.hash'], period=cfg.get('security.period', 0), new_hash=save_new_hash(cfg))
@@ -490,7 +550,7 @@ def main(args=None):
         app,
         host = cfg.get('server.host', 'localhost'),
         port = cfg.get('server.port', 8001),
-        log_level = cfg.get('server.log level', 'error'),
+        log_level = cfg.get('logging.log level', 'error').lower(),
         ssl_keyfile = ssl_keyfile,
         ssl_certfile = ssl_certfile
     )

@@ -15,7 +15,7 @@ The first (and only) argument is the path to a configuration file. If omitted
 (or a directory), it uses `config.json`.
 
 Any file paths in the configuration file are relative to the instance directory
-which is give in the configuration file or, when omitted, the directory
+which is in the configuration file or, when omitted, the directory
 containing the configuration file.
 
 If you include a password entry in the security section, it will be hashed and

@@ -8,9 +8,12 @@
 		"directory": null,
 		"host": "localhost",
 		"port": 8001,
-		"log level": "info",
 		"ssl-key": "localhost-key.pem",
 		"ssl-cert": "localhost.pem"
+	},
+	"logging": {
+		"directory": null,
+		"log level": "info"
 	},
 	"database": {
 		"filename": "jsonstorage.sqlite"
