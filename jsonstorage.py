@@ -283,6 +283,30 @@ class JSONStorage:
         'response_description': 'The stored json object'
     }
 
+    def post_json(self,
+        content = Body(..., example={ "key": "value", "...": "..." }),
+        effdt: datetime.datetime = Query(None, description='Add item with specific date/time'),
+        prefix: str = Query('', description='Add prefix to the generated id')
+    ):
+        """Store a json object"""
+        id = '{}{}'.format(prefix, uuid.uuid1())
+        return {
+            'id': id,
+            'content': self.put_json(id, content=content, effdt=effdt)
+        }
+    post_json.route = '/'
+    post_json.route_params = {
+        'status_code': status.HTTP_201_CREATED,
+        'responses': {
+            status.HTTP_201_CREATED: RESPONSE_JSON,
+            **responses(status.HTTP_404_NOT_FOUND)
+        },
+        'name': 'storage.post',
+        'summary': 'Store a json object',
+        'description': TrueString(),
+        'response_description': 'The stored json object'
+    }
+
     def put_json(self,
         id: str,
         content = Body(..., example={ "key": "value", "...": "..." }),
