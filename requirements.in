@@ -1,6 +1,8 @@
 fastapi
 uvicorn
 passlib
+loguru
 # Optional:
-jsonpatch
-ruamel.yaml
+#jsonpatch
+#ruamel.yaml
+#toml

@@ -1,8 +1,7 @@
 {
 	"security": {
 		"password": "Test",
-		"hash": "$pbkdf2-sha256$29000$E.IcI2QMwZjTGuMcw9j7vw$KwExI0fWRwzUjGxp28uOuktYzhdXw7PGqktACwBhM7E",
-		"period": 0
+		"hash": "$pbkdf2-sha256$29000$E.IcI2QMwZjTGuMcw9j7vw$KwExI0fWRwzUjGxp28uOuktYzhdXw7PGqktACwBhM7E"
 	},
 	"server": {
 		"directory": null,
@@ -13,7 +12,8 @@
 	},
 	"logging": {
 		"directory": null,
-		"log level": "info"
+		"console level": "warning",
+		"file level": "info"
 	},
 	"database": {
 		"filename": "jsonstorage.sqlite"

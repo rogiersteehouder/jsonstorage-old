@@ -7,10 +7,9 @@ Provides REST webservices (with FastAPI) to store and retrieve json objects.
 """
 
 __author__  = 'Rogier Steehouder'
-__date__    = '2021-12-11'
-__version__ = '1.0'
+__date__    = '2022-01-12'
+__version__ = '1.1'
 
-# TODO: logging
 # TODO: etag
 
 import sys
@@ -18,7 +17,6 @@ import contextlib
 import datetime
 import getpass
 import json
-import logging
 import sqlite3
 import uuid
 from pathlib import Path
@@ -27,6 +25,7 @@ from typing import List
 import uvicorn
 from fastapi import FastAPI, Depends, APIRouter, Request, Query, Body, Response, status, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from loguru import logger
 from passlib.context import CryptContext
 
 # Optional for patch operation
@@ -41,6 +40,11 @@ try:
     yaml.default_flow_style = False
 except:
     yaml = None
+# Optional for toml config
+try:
+    import toml
+except:
+    toml = None
 
 
 #####
@@ -49,32 +53,50 @@ except:
 class Config:
     """Config class
 
-    Can read/save json or yaml.
+    Can read/save json, yaml or toml.
     Use dot notation to get subkeys.
     """
-    def __init__(self, filename):
-        self.path = Path(filename)
+    def __init__(self, cfgfile):
+        path = Path(cfgfile)
+        if path.is_dir():
+            try:
+                path = next(path.glob('config.*'))
+            except StopIteration:
+                path = path / 'config.yaml'
+        if not path.exists():
+            path.touch()
+
+        self.path = path
         self.load()
 
     @property
     def path(self):
+        """File path of the config file"""
         return self._path
     @path.setter
     def path(self, p):
         self._path = Path(p)
         self.yaml = (yaml and self._path.suffix == '.yaml')
+        self.toml = (toml and self._path.suffix == '.toml')
 
     def load(self):
         """Load config from file"""
-        if self.yaml:
-            self._config = yaml.load(self.path.read_text())
+        content = self.path.read_text()
+        if not content:
+            self._config = {}
+        elif self.yaml:
+            self._config = yaml.load(content)
+        elif self.toml:
+            self._config = toml.loads(content)
         else:
-            self._config = json.loads(self.path.read_text())
+            self._config = json.loads(content)
 
     def save(self):
         """Save config to file"""
         if self.yaml:
             yaml.dump(self._config, self.path)
+        elif self.toml:
+            self.path.write_text(toml.dumps(self._config))
         else:
             self.path.write_text(json.dumps(self._config, indent='\t'))
 
@@ -137,9 +159,10 @@ class Security:
     Use a callback function to save a changed password hash when needed.
     Add security.valid_password as a dependency.
     """
-    def __init__(self, hash: str, *, period: int = 0, new_hash: callable = None):
+    def __init__(self, hash: str, *, period: int = 0, new_hash: callable = None, logger: 'loguru._logger.Logger'):
         self.hash = hash
         self.new_hash = new_hash
+        self.logger = logger
 
         self.period = None
         if period > 0:
@@ -154,11 +177,11 @@ class Security:
             ok = (ok and self.renew > datetime.datetime.now())
             self.renew = datetime.datetime.now() + self.period
         if not ok:
-            logging.getLogger('jsonstorage.security').warning('Invalid password')
+            self.logger.warning('Invalid password')
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Incorrect password", headers={'WWW-Authenticate': 'Basic'})
         if new_hash and self.new_hash is not None:
             self.new_hash(new_hash)
-            logging.getLogger('jsonstorage.security').info('New hash generated and saved')
+            self.logger.info('New hash generated and saved')
 
 
 #####
@@ -199,15 +222,15 @@ class JSONStorage:
     sql_get_item = "select s.content from storage s where s.name = :p and effdt <= :d and not exists (select 1 from storage where name = s.name and effdt > s.effdt and effdt <= :d) and s.status = 'A'"
     sql_insert_item = "insert into storage values(:p, :d, :s, :c)"
 
-    def __init__(self, base_dir: Path, config: Config):
+    def __init__(self, base_dir: Path, config: Config, logger: 'loguru._logger.Logger'):
         self.config = config
-        self.logger = logging.getLogger('jsonstorage')
+        self.logger = logger
         self._db_file = base_dir / config.get('database.filename', 'jsonstorage.sqlite')
         if not self._db_file.exists():
+            self.logger.debug('New database file {}', self._db_file)
             self._db_init()
 
     def get_list(self,
-        request: Request,
         like: str = Query(None, description="Filter with sql 'like' syntax", example='%abc%'),
         glob: str = Query(None, description="Filter with 'glob' syntax", example='\*abc\*'),
         sync: bool = Query(False, description="Output sync format with update date/time"),
@@ -226,15 +249,16 @@ class JSONStorage:
         with self._db_connect() as conn:
             cur = conn.cursor()
             if cleanup:
-                self.logger.info('Cleanup requested by {}'.format(request.client.host))
+                self.logger.info('Cleanup: removing old inactive items from the database')
                 cur.execute("with old_stuff as (select s.name, s.effdt from storage s where s.effdt < datetime('now', '-1 years') {} and (s.status = 'I' or exists (select 1 from storage where name = s.name and effdt > s.effdt))) delete from storage where exists (select 1 from old_stuff where name = storage.name and effdt = storage.effdt)".format(crit))
 
             if sync:
-                self.logger.info('Sync list requested by {}'.format(request.client.host))
+                self.logger.debug('Sync list for items like {} or {}', like, glob)
                 cur.execute("select s.name, s.effdt, s.status from storage s where 1=1 {} order by s.name, s.effdt".format(crit), {'l': like, 'g': glob})
                 items = [{ 'name': row['name'], 'effdt': datetime_fromdb(row['effdt']), 'status': row['status']} for row in cur.fetchall()]
             else:
-                cur.execute("select s.name from storage s where effdt <= :d and not exists (select 1 from storage where name = s.name and effdt > s.effdt and effdt <= :d) and s.status = 'A' {} order by s.name".format(crit), {'l': like, 'g': glob, 'd': datetime_todb(datetime.datetime.now())})
+                self.logger.debug('List for items like {} or {}', like, glob)
+                cur.execute("select s.name from storage s where effdt <= :d and not exists (select 1 from storage where name = s.name and effdt > s.effdt and effdt <= :d) and s.status = 'A' {} order by s.name".format(crit), {'l': like, 'g': glob, 'd': datetime_todb(datetime.datetime.utcnow())})
                 items = [row['name'] for row in cur.fetchall()]
             cur.close()
 
@@ -261,8 +285,9 @@ class JSONStorage:
         effdt: datetime.datetime = Query(None, description="Get item with specific date/time"),
     ):
         """Retrieve a stored json object"""
+        self.logger.debug('Get item {}', id)
         if effdt is None:
-            effdt = datetime.datetime.now()
+            effdt = datetime.datetime.utcnow()
 
         with self._db_connect() as conn:
             cur = conn.cursor()
@@ -289,7 +314,8 @@ class JSONStorage:
         effdt: datetime.datetime = Query(None, description='Add item with specific date/time'),
         prefix: str = Query('', description='Add prefix to the generated id')
     ):
-        """Store a json object"""
+        """Store a json object with a new id"""
+        self.logger.debug('Post: new item id')
         id = '{}{}'.format(prefix, uuid.uuid1())
         return {
             'id': id,
@@ -299,7 +325,14 @@ class JSONStorage:
     post_json.route_params = {
         'status_code': status.HTTP_201_CREATED,
         'responses': {
-            status.HTTP_201_CREATED: RESPONSE_JSON,
+            status.HTTP_201_CREATED: {
+                'description': 'An id and the stored json object',
+                'content': {
+                    'application/json': {
+                        'example': { "id": "new id", "content": RESPONSE_JSON['content']['application/json']['example'] }
+                    }
+                }
+            },
             **responses(status.HTTP_404_NOT_FOUND)
         },
         'name': 'storage.post',
@@ -314,10 +347,9 @@ class JSONStorage:
         effdt: datetime.datetime = Query(None, description="Add item with specific date/time"),
     ):
         """Store a json object"""
-        self.logger.info('Item {} changed by {}'.format(id, request.client.host))
-
+        self.logger.debug('Put item {}', id)
         if effdt is None:
-            effdt = datetime.datetime.now()
+            effdt = datetime.datetime.utcnow()
 
         with self._db_connect() as conn:
             cur = conn.cursor()
@@ -346,11 +378,10 @@ class JSONStorage:
         if jsonpatch is None:
             HTTPException(status.HTTP_501_NOT_IMPLEMENTED)
 
-        self.logger.info('Item {} changed by {}'.format(id, request.client.host))
-
+        self.logger.debug('Patch item {}', id)
         with self._db_connect() as conn:
             cur = conn.cursor()
-            cur.execute(self.sql_get_item, {'p': id, 'd': datetime_todb(datetime.datetime.now())})
+            cur.execute(self.sql_get_item, {'p': id, 'd': datetime_todb(datetime.datetime.utcnow())})
             row = cur.fetchone()
             if row is None:
                 raise HTTPException(status.HTTP_404_NOT_FOUND)
@@ -358,7 +389,7 @@ class JSONStorage:
             json_orig = json.loads(row['content'])
             json_new = jsonpatch.apply_patch(json_orig, patch)
 
-            cur.execute(self.sql_insert_item, {'p': id, 'd': datetime_todb(datetime.datetime.now()), 's': 'A', 'c': json.dumps(json_new)})
+            cur.execute(self.sql_insert_item, {'p': id, 'd': datetime_todb(datetime.datetime.utcnow()), 's': 'A', 'c': json.dumps(json_new)})
             cur.close()
 
         return json_new
@@ -379,10 +410,9 @@ class JSONStorage:
         effdt: datetime.datetime = Query(None, description="Delete item with specific date/time"),
     ):
         """Remove a stored json object"""
-        self.logger.info('Item {} removed by {}'.format(id, request.client.host))
-
+        self.logger.debug('Delete item {}', id)
         if effdt is None:
-            effdt = datetime.datetime.now()
+            effdt = datetime.datetime.utcnow()
 
         with self._db_connect() as conn:
             cur = conn.cursor()
@@ -402,7 +432,7 @@ class JSONStorage:
         'status_code': status.HTTP_204_NO_CONTENT,
         'name': 'storage.delete',
         'summary': 'Remove a stored json object',
-        'description': TrueString()
+        'description': 'The stored object is not really deleted, but marked as invalid. This way history is preserved.'
     }
 
     def router(self):
@@ -482,75 +512,70 @@ def main(args=None):
         args.append('.')
 
     # Config
-    cfg_file = Path(args[0])
-    if cfg_file.is_dir():
-        cfg_file = cfg_file / 'config.json'
-    cfg = Config(cfg_file)
+    config = Config(Path(args[0]))
 
-    base_dir = Path(cfg.get('server.directory', cfg_file.parent)).expanduser()
+    base_dir = Path(config.get('server.directory', config.path.parent)).expanduser()
 
     # Logging
-    logdir = Path(cfg.get('logging.directory', base_dir)).expanduser()
-    logging.config.dictConfig({
-        'version': 1,
-        'disable_existing_loggers': False,
-        'formatters': {
-            'default': {
-                'format': '{asctime} ({name}) {levelname}: {message}',
-                'datefmt': '%Y-%m-%d %H:%M:%S',
-                'style': '{',
-                'use_colors': True
-            }
-        },
-        'handlers': {
-            'screen': {
-                'level': cfg.get('logging.log level', 'error').upper(),
-                'class': 'logging.StreamHandler',
-                'stream': 'ext://sys.stderr',
-                'formatter': 'default'
-            },
-            'file': {
-                'level': 'INFO',
-                'class': 'logging.handlers.TimedRotatingFileHandler',
-                'filename': str(logdir / 'app.log'),
-                'when': 'midnight',
-                'backupCount': 4,
-                'delay': True,
-                'formatter': 'default'
-            }
-        },
-        'loggers': {
-            'jsonstorage': {
-                'level': cfg.get('logging.log level', 'error').upper(),
-                'handlers': ['screen', 'file']
-            },
-            'fastapi': {
-                'level': 'INFO',
-                'handlers': ['screen', 'file']
-            }
-        }
-    })
+    logger.configure(
+        handlers = [],
+        extra = { 'logtype': 'main' }
+    )
 
-    # Password
-    pwd = cfg.get('security.password')
+    # console logging
+    loglevel = config.get('logging.console level', 'error').upper()
+    if loglevel != 'DISABLE':
+        loglevel = logger.level(loglevel)
+        debug = (loglevel.no <= logger.level('DEBUG').no)
+        levelstr = '{level.icon: ^3}' if sys.stderr.encoding == 'utf-8' else '{level: <8}'
+        logger.add(sys.stderr,
+            level = loglevel.name,
+            format = '<light-black>{time:YYYY-MM-DD HH:mm:ss}</light-black> | <level>' + levelstr + '</level> | {extra[logtype]} | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - {message}',
+            filter = None,
+            backtrace = debug,
+            diagnose = debug
+        )
+
+    # file logging
+    loglevel = config.get('logging.file level', 'error').upper()
+    if loglevel != 'DISABLE':
+        loglevel = logger.level(loglevel)
+        debug = (loglevel.no <= logger.level('DEBUG').no)
+        logdir = Path(config.get('logging.directory', base_dir)).expanduser().resolve()
+        logger.add(logdir / 'app-{time:YYYY-MM-DD}.log',
+            level = loglevel.name,
+            format = '{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {extra[logtype]} | {name}:{function}:{line} - {message}',
+            filter = None,
+            backtrace = debug,
+            diagnose = debug,
+            enqueue = True,
+            encoding = 'utf-8',
+            rotation = '00:00',
+            retention = 5,
+            compression = None if debug else 'zip'
+        )
+
+    # Authentication
+    sec_logger = logger.bind(logtype='main.security')
+    pwd = config.get('security.password')
     if pwd is not None:
-        cfg['security.hash'] = Security.context.hash(pwd)
-        del cfg['security.password']
-        cfg.save()
-        logging.getLogger('jsonstorage.security').info('New password hashed and saved')
-    pwd_hash = cfg.get('security.hash')
+        config['security.hash'] = Security.context.hash(pwd)
+        del config['security.password']
+        config.save()
+        sec_logger.info('New password hashed and saved')
+    pwd_hash = config.get('security.hash')
     if pwd_hash is None:
         pwd = getpass.getpass()
         pwd_hash = Security.context.hash(pwd)
-        cfg['security.hash'] = pwd_hash
-        cfg.save()
-        logging.getLogger('jsonstorage.security').info('New password hashed and saved')
+        config['security.hash'] = pwd_hash
+        config.save()
+        sec_logger.info('New password hashed and saved')
     del pwd
 
-    security = Security(cfg['security.hash'], period=cfg.get('security.period', 0), new_hash=save_new_hash(cfg))
+    security = Security(config['security.hash'], period=config.get('security.period', 0), new_hash=save_new_hash(config), logger=sec_logger)
 
     # JSON Storage
-    jsonstore = JSONStorage(base_dir, cfg)
+    jsonstore = JSONStorage(base_dir, config, logger)
 
     app = FastAPI(
         title = 'JSON Storage',
@@ -564,18 +589,19 @@ def main(args=None):
     )
 
     # Run server
-    ssl_keyfile = cfg.get('server.ssl-key')
+    ssl_keyfile = config.get('server.ssl-key')
     if ssl_keyfile is not None:
         ssl_keyfile = base_dir / ssl_keyfile
-    ssl_certfile = cfg.get('server.ssl-cert')
+    ssl_certfile = config.get('server.ssl-cert')
     if ssl_certfile is not None:
         ssl_certfile = base_dir / ssl_certfile
 
     uvicorn.run(
         app,
-        host = cfg.get('server.host', 'localhost'),
-        port = cfg.get('server.port', 8001),
-        log_level = cfg.get('logging.log level', 'error').lower(),
+        host = config.get('server.host', 'localhost'),
+        port = config.get('server.port', 8001),
+        log_config = dict(version=1, disable_existing_loggers=False),
+        log_level = 'debug', # log everything, then let loguru handle the filtering
         ssl_keyfile = ssl_keyfile,
         ssl_certfile = ssl_certfile
     )
